@@ -64,6 +64,7 @@ public:
         dev_.write = bmi2_i2c_write; // Assign custom I2C write function
         dev_.delay_us = bmi2_delay_us; // Assign custom delay function
         dev_.read_write_len = 32; // Maximum bytes to read/write in a single transaction
+        dev_.config_file_ptr = NULL; // Assign to NULL to load the default config file. see common.c
 
         // Initialize BMI270 sensor
         if (bmi270_init(&dev_) != BMI2_OK) {
