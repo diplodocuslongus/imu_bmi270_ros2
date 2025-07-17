@@ -1,4 +1,7 @@
 /**\
+ * FIFO with header (gryo, accel and SensorTime), based on the bosch example 
+ * and Chobits' .c adaptation for the RPi.
+ *
  * This code makes use of the Bosch code, released with the following license.
  *
  * Copyright (c) 2023 Bosch Sensortec GmbH. All rights reserved.
@@ -23,8 +26,6 @@
 //  see bmi270_driver package.xml and CMakeLists.txt
 #include "bmi270_driver/bmi2.h"
 #include "bmi270_driver/bmi270.h"
-// Although bmi2.h often pulls it in, explicitly including for definitions like bmi2_sens_data can sometimes help with visibility.
-// #include "bmi270_driver/bmi2_defs.h"
 
 /******************************************************************************/
 /*!                  Macros                                                   */
@@ -71,12 +72,15 @@ struct bmi2_sens_axes_data fifo_gyro_data[BMI2_FIFO_GYRO_FRAME_COUNT] = { { 0 } 
 
 using namespace std::chrono_literals;
 
-// Forward declarations for I2C and delay functions
+// Forward declarations 
+// for I2C and delay functions and more
 // These must match the function pointer types expected by the Bosch API (was
 // the source of many build error...)
+static int8_t set_accel_gyro_config(struct bmi2_dev *dev);
 int8_t bmi2_i2c_read(uint8_t reg_addr, uint8_t *data, uint32_t len, void *intf_ptr);
 int8_t bmi2_i2c_write(uint8_t reg_addr, const uint8_t *data, uint32_t len, void *intf_ptr);
 void bmi2_delay_us(uint32_t period, void*); // void* parameter is required by API but unused here
+void bmi2_error_codes_print_result(int8_t rslt);
 
 class BMI270Node : public rclcpp::Node
 {
@@ -98,7 +102,6 @@ public:
 
         // Set I2C slave address for BMI270 (0x68 or 0x69)
         // Ensure this matches the hardware configuration. 
-        // BMI2_I2C_ADDR_PRIM is typically 0x68.
         // I hard code 0x68 to avoid "not declared in this scope" issues 
         if (ioctl(i2c_fd_, I2C_SLAVE, 0x68) < 0) {
             RCLCPP_FATAL(get_logger(), "Failed to set I2C address 0x%X. Please check your I2C address. Error: %s", 0x68, strerror(errno));
@@ -109,144 +112,83 @@ public:
 
         // Initialize BMI2 sensor device structure
         /* Status of api are returned to this variable. */
-        int8_t rslt;
-
-        uint16_t index = 0;
-        uint16_t fifo_length = 0;
-        uint16_t config = 0;
-
-        /* Variable to get fifo full interrupt status. */
-        uint16_t int_status = 0;
-
-        uint16_t accel_frame_length = BMI2_FIFO_ACCEL_FRAME_COUNT;
-
-        uint16_t gyro_frame_length = BMI2_FIFO_GYRO_FRAME_COUNT;
-
-        int8_t try = 1;
-
-        /* Sensor initialization configuration. */
-        struct bmi2_dev bmi2_dev;
-
-        /* Initialize FIFO frame structure. */
-        struct bmi2_fifo_frame fifoframe = { 0 };
+        // int8_t rslt;
 
         /* Accel and gyro sensor are listed in array. */
         uint8_t sensor_sel[2] = { BMI2_ACCEL, BMI2_GYRO };
 
-
-
-
-        bmi2_dev.intf = BMI2_I2C_INTF; // Set interface to I2C
-        bmi2_dev.intf_ptr = &i2c_fd_;  // Pointer to the I2C file descriptor
-        bmi2_dev.read = bmi2_i2c_read; // Assign custom I2C read function
-        bmi2_dev.write = bmi2_i2c_write; // Assign custom I2C write function
-        bmi2_dev.delay_us = bmi2_delay_us; // Assign custom delay function
-        bmi2_dev.read_write_len = 32; // Maximum bytes to read/write in a single transaction
+        bmi2_dev_.intf = BMI2_I2C_INTF; // Set interface to I2C
+        bmi2_dev_.intf_ptr = &i2c_fd_;  // Pointer to the I2C file descriptor
+        bmi2_dev_.read = bmi2_i2c_read; // Assign custom I2C read function
+        bmi2_dev_.write = bmi2_i2c_write; // Assign custom I2C write function
+        bmi2_dev_.delay_us = bmi2_delay_us; // Assign custom delay function
+        bmi2_dev_.read_write_len = 32; // Maximum bytes to read/write in a single transaction
 
         // Initialize BMI270 sensor
-        rslt = bmi270_init(&bmi2_dev);
-        if (rslt != BMI2_OK) {
+        rslt_ = bmi270_init(&bmi2_dev_);
+        if (rslt_ != BMI2_OK) {
             RCLCPP_FATAL(get_logger(), "BMI270 initialization failed. Check wiring and power.");
-            bmi2_error_codes_print_result(rslt); //TODO may not work, adjust to ros2 log
+            bmi2_error_codes_print_result(rslt_); //TODO may not work, adjust to ros2 log
             close(i2c_fd_);
             rclcpp::shutdown();
             return;
         }
         RCLCPP_INFO(get_logger(), "BMI270 initialized successfully.");
 
-        //New from fifo_full_header_mode
+        //from fifo_full_header_mode example
         /* Configuration settings for accel and gyro. */
-        rslt = set_accel_gyro_config(&bmi2_dev);
-        bmi2_error_codes_print_result(rslt);
+        rslt_ = set_accel_gyro_config(&bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
         /* NOTE:
          * Accel and Gyro enable must be done after setting configurations
          */
-        rslt = bmi270_sensor_enable(sensor_sel, 2, &bmi2_dev);
-        bmi2_error_codes_print_result(rslt);
+        rslt_ = bmi270_sensor_enable(sensor_sel, 2, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
         /* Before setting FIFO, disable the advance power save mode. */
-        rslt = bmi2_set_adv_power_save(BMI2_DISABLE, &bmi2_dev);
-        bmi2_error_codes_print_result(rslt);
+        rslt_ = bmi2_set_adv_power_save(BMI2_DISABLE, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
         /* Initially disable all configurations in fifo. */
-        rslt = bmi2_get_fifo_config(&config, &bmi2_dev);
-        bmi2_error_codes_print_result(rslt);
+        rslt_ = bmi2_get_fifo_config(&config_, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
         /* Initially disable all configurations in fifo. */
-        rslt = bmi2_set_fifo_config(BMI2_FIFO_ALL_EN, BMI2_DISABLE, &bmi2_dev);
-        bmi2_error_codes_print_result(rslt);
+        rslt_ = bmi2_set_fifo_config(BMI2_FIFO_ALL_EN, BMI2_DISABLE, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
         /* Update FIFO structure. */
         /* Mapping the buffer to store the fifo data. */
-        fifoframe.data = fifo_data;
+        fifoframe_.data = fifo_data;
 
         /* Length of FIFO frame. */
         /* To read sensortime, extra 3 bytes are added to fifo user length. */
-        fifoframe.length = BMI2_FIFO_RAW_DATA_USER_LENGTH + SENSORTIME_OVERHEAD_BYTE;
+        fifoframe_.length = BMI2_FIFO_RAW_DATA_USER_LENGTH + SENSORTIME_OVERHEAD_BYTE;
 
         /* Set FIFO configuration by enabling accel, gyro and timestamp.
          * NOTE 1: The header mode is enabled by default.
          * NOTE 2: By default the FIFO operating mode is in FIFO mode.
          * NOTE 3: Sensortime is enabled by default */
-        printf("FIFO is configured in header mode\n");
-        rslt = bmi2_set_fifo_config(BMI2_FIFO_ACC_EN | BMI2_FIFO_GYR_EN, BMI2_ENABLE, &bmi2_dev);
-        bmi2_error_codes_print_result(rslt);
+        RCLCPP_INFO(get_logger(), "FIFO is configured in header mode.");
+        rslt_ = bmi2_set_fifo_config(BMI2_FIFO_ACC_EN | BMI2_FIFO_GYR_EN, BMI2_ENABLE, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
         /* Map FIFO full interrupt. */
-        fifoframe.data_int_map = BMI2_FFULL_INT;
-        rslt = bmi2_map_data_int(fifoframe.data_int_map, BMI2_INT1, &bmi2_dev);
-        bmi2_error_codes_print_result(rslt);
+        fifoframe_.data_int_map = BMI2_FFULL_INT;
+        rslt_ = bmi2_map_data_int(fifoframe_.data_int_map, BMI2_INT1, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
         uint8_t sensortime_raw[3] = { 0 };
-        rslt = bmi2_get_regs(BMI2_CHIP_ID_ADDR, sensortime_raw, 3, &bmi2_dev);
-        if (rslt == BMI2_OK) {
+        rslt_ = bmi2_get_regs(BMI2_CHIP_ID_ADDR, sensortime_raw, 3, &bmi2_dev_);
+        if (rslt_ == BMI2_OK) {
             uint32_t sensortime = 0;
             sensortime = (uint32_t)sensortime_raw[0] | ((uint32_t)sensortime_raw[1] << 8) | ((uint32_t)sensortime_raw[2] << 16);
-            printf("sensor time (s) %f\n", sensortime * BMI2_SENSORTIME_RESOLUTION);
+            // printf("sensor time (s) %f\n", sensortime * BMI2_SENSORTIME_RESOLUTION);
+            RCLCPP_INFO(get_logger(), "sensor time (s) %f\n", sensortime * BMI2_SENSORTIME_RESOLUTION);
         }
-
-
-
-        // previous
-        
         // Sensor configuration
-//        struct bmi2_sens_config config[2] = {0}; // Initialize with zeros
-//
-//        // Accelerometer configuration
-//        config[0].type = BMI2_ACCEL;
-//        config[0].cfg.acc.odr = BMI2_ACC_ODR_200HZ; // Output Data Rate: 100Hz
-//        config[0].cfg.acc.range = BMI2_ACC_RANGE_4G; // Range: +/- 4G
-//        config[0].cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4; // Bandwidth parameter: Normal average 4
-//        config[0].cfg.acc.filter_perf = BMI2_PERF_OPT_MODE; // Performance mode: Optimized
-//
-//        // Gyroscope configuration
-//        // all hardcoded for now, TODO see how to use a parameter file to set them 
-//        config[1].type = BMI2_GYRO;
-//        config[1].cfg.gyr.odr = BMI2_GYR_ODR_200HZ; // Output Data Rate: 100Hz
-//        config[1].cfg.gyr.range = BMI2_GYR_RANGE_2000; // Range: +/- 2000 degrees per second (dps)
-//        config[1].cfg.gyr.bwp = BMI2_GYR_NORMAL_MODE; // Bandwidth parameter: Normal mode
-//        config[1].cfg.gyr.noise_perf = BMI2_PERF_OPT_MODE; // Noise performance mode: Optimized
-//        config[1].cfg.gyr.filter_perf = BMI2_PERF_OPT_MODE; // Filter performance mode: Optimized
-//
-//        // Set sensor configurations
-//        if (bmi2_set_sensor_config(config, 2, &bmi2_dev) != BMI2_OK) {
-//            RCLCPP_FATAL(get_logger(), "Sensor configuration failed.");
-//            close(i2c_fd_);
-//            rclcpp::shutdown();
-//            return;
-//        }
-//        RCLCPP_INFO(get_logger(), "Sensor configured for Accel and Gyro.");
-//
-//        // Enable sensors
-//        uint8_t sensors[2] = { BMI2_ACCEL, BMI2_GYRO };
-//        if (bmi2_sensor_enable(sensors, 2, &bmi2_dev) != BMI2_OK) {
-//            RCLCPP_FATAL(get_logger(), "Sensor enabling failed.");
-//            close(i2c_fd_);
-//            rclcpp::shutdown();
-//            return;
-//        }
-        RCLCPP_INFO(get_logger(), "Accel and Gyro enabled.");
+        RCLCPP_INFO(get_logger(), "End of config, Accel and Gyro enabled.");
     } // node declaration
 
     // Destructor to ensure I2C file descriptor is closed
@@ -261,53 +203,125 @@ public:
 private:
     void timer_callback()
     {
-        // Declaring a single bmi2_sens_data struct
-        // as bmi2_get_sensor_data populates it with all enabled sensor data
-        // struct bmi2_sens_data sensor_data; // no more needed
+
+        uint16_t index = 0;
+        uint16_t fifo_length = 0;
+
+        /* Variable to get fifo full interrupt status. */
+        uint16_t int_status = 0;
+
+        uint16_t accel_frame_length = BMI2_FIFO_ACCEL_FRAME_COUNT;
+
+        uint16_t gyro_frame_length = BMI2_FIFO_GYRO_FRAME_COUNT;
 
         // Read sensor data from BMI270
-        // bmi2_get_sensor_data expects a pointer to a single bmi2_sens_data struct and the device struct
-        // if ((bmi2_get_sensor_data(&sensor_data, &bmi2_dev) == BMI2_OK) && (sensor_data.status & BMI2_DRDY_ACC) && (sensor_data.status & BMI2_DRDY_GYR)) {
-        if ((rslt == BMI2_OK) && (int_status & BMI2_FFULL_INT_STATUS_MASK))
-            // TODO: continue ffrom here!
+        /* Read FIFO data on interrupt. */
+        rslt_ = bmi2_get_int_status(&int_status, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
 
-            // Create and populate ROS2 Imu message
-            auto msg = sensor_msgs::msg::Imu();
-            struct timespec tp;
-            clock_gettime(CLOCK_MONOTONIC, &tp);
-            msg.header.stamp = rclcpp::Time(tp.tv_sec * 1000000000 + tp.tv_nsec, RCL_STEADY_TIME);
-            msg.header.frame_id = "imu_link"; // Coordinate frame ID
-            // TODO: populate sensor data from fifo_accel_data (see example, for loop)                                              
+        // Convert raw accelerometer data to m/s^2
+        float acc_scale = (4.0f * 9.80665f) / 32768.0f; // Scale factor for +/-4G range (m/s^2 per LSB)
+        // Convert raw gyroscope data to rad/s
+        float gyro_scale = (2000.0f / 32768.0f) * (M_PI / 180.0f); // Scale factor for +/-2000 dps range (rad/s per LSB)
+        if ((rslt_ == BMI2_OK) && (int_status & BMI2_FFULL_INT_STATUS_MASK)){
+            RCLCPP_INFO(get_logger(), "got ok rslt_ in callback.");
+            accel_frame_length = BMI2_FIFO_ACCEL_FRAME_COUNT;
+            gyro_frame_length = BMI2_FIFO_GYRO_FRAME_COUNT;
+            rslt_ = bmi2_get_fifo_length(&fifo_length, &bmi2_dev_);
+            bmi2_error_codes_print_result(rslt_);
+            /* Updating FIFO length to be read based on available length and dummy byte updation */
+            fifoframe_.length = fifo_length + SENSORTIME_OVERHEAD_BYTE + bmi2_dev_.dummy_byte;
+            RCLCPP_INFO(get_logger(), "FIFO data bytes available : %d \n", fifo_length);
+            printf("\nFIFO data bytes available : %d \n", fifo_length);
+            printf("\nFIFO data bytes requested : %d \n", fifoframe_.length);
 
-            // Convert raw accelerometer data to m/s^2
-            // Accessing acc data directly from the sensor_data struct
-            float acc_scale = (4.0f * 9.80665f) / 32768.0f; // Scale factor for +/-4G range (m/s^2 per LSB)
-            msg.linear_acceleration.x = sensor_data.acc.x * acc_scale;
-            msg.linear_acceleration.y = sensor_data.acc.y * acc_scale;
-            msg.linear_acceleration.z = sensor_data.acc.z * acc_scale;
+            /* Read FIFO data. */
+            rslt_ = bmi2_read_fifo_data(&fifoframe_, &bmi2_dev_);
+            bmi2_error_codes_print_result(rslt_);
 
-            // Convert raw gyroscope data to rad/s
-            // Accessing gyr data directly from the sensor_data struct
-            float gyro_scale = (2000.0f / 32768.0f) * (M_PI / 180.0f); // Scale factor for +/-2000 dps range (rad/s per LSB)
-            msg.angular_velocity.x = sensor_data.gyr.x * gyro_scale;
-            msg.angular_velocity.y = sensor_data.gyr.y * gyro_scale;
-            msg.angular_velocity.z = sensor_data.gyr.z * gyro_scale;
+            /* Read FIFO data on interrupt. */
+            rslt_ = bmi2_get_int_status(&int_status, &bmi2_dev_);
+            bmi2_error_codes_print_result(rslt_);
+            if (rslt_ == BMI2_OK)
+            {
+                printf("\nFIFO accel frames requested : %d \n", accel_frame_length);
 
-            // The following is according to ros2 imu message:
-            // Gyroscope and Accelerometer covariance are usually set to 0 if not calculated
-            // If you have calibration data, you can set these. Otherwise, leave as 0
-            msg.angular_velocity_covariance[0] = -1; // Indicate no covariance data available
-            msg.linear_acceleration_covariance[0] = -1; // Indicate no covariance data available
+                /* Parse the FIFO data to extract accelerometer data from the FIFO buffer. */
+                (void)bmi2_extract_accel(fifo_accel_data, &accel_frame_length, &fifoframe_, &bmi2_dev_);
+                printf("\nFIFO accel frames extracted : %d \n", accel_frame_length);
 
-            // Publish the Imu message
-            publisher_->publish(msg);
+                printf("\nFIFO gyro frames requested : %d \n", gyro_frame_length);
+
+                /* Parse the FIFO data to extract gyro data from the FIFO buffer. */
+                (void)bmi2_extract_gyro(fifo_gyro_data, &gyro_frame_length, &fifoframe_, &bmi2_dev_);
+                printf("\nFIFO gyro frames extracted : %d \n", gyro_frame_length);
+
+                printf("\nExtracted accel frames\n");
+
+                printf("ACCEL_DATA, X, Y, Z\n");
+
+                // TODO review publishing, esp, acc and gyro nb frame may be different.
+                /* Print the parsed accelerometer data from the FIFO buffer. */
+                for (index = 0; index < accel_frame_length; index++)
+                {
+                    // Create and populate ROS2 Imu message
+                    auto msg = sensor_msgs::msg::Imu();
+                    struct timespec tp;
+                    clock_gettime(CLOCK_MONOTONIC, &tp);
+                    msg.header.stamp = rclcpp::Time(tp.tv_sec * 1000000000 + tp.tv_nsec, RCL_STEADY_TIME);
+                    msg.header.frame_id = "imu_link"; // Coordinate frame ID
+                    // printf("%d, %d, %d, %d\n",
+                    //        index,
+                    //        fifo_accel_data[index].x,
+                    //        fifo_accel_data[index].y,
+                    //        fifo_accel_data[index].z);
+                    msg.linear_acceleration.x = fifo_accel_data[index].x * acc_scale;
+                    msg.linear_acceleration.y = fifo_accel_data[index].y * acc_scale;
+                    msg.linear_acceleration.z = fifo_accel_data[index].z * acc_scale;
+                    msg.linear_acceleration_covariance[0] = -1; // Indicate no covariance data available
+                    msg.angular_velocity.x = fifo_gyro_data[index].x * gyro_scale;
+                    msg.angular_velocity.y = fifo_gyro_data[index].y * gyro_scale;
+                    msg.angular_velocity.z = fifo_gyro_data[index].z * gyro_scale;
+                    msg.angular_velocity_covariance[0] = -1; // Indicate no covariance data available
+                    publisher_->publish(msg);
+                }
+
+                // printf("\nExtracted gyro frames\n");
+                // printf("GYRO_DATA, X, Y, Z\n");
+
+                /* Print the parsed gyro data from the FIFO buffer. */
+                for (index = 0; index < gyro_frame_length; index++)
+                {
+                    // printf("%d, %d, %d, %d\n", index, fifo_gyro_data[index].x, fifo_gyro_data[index].y,
+                    //        fifo_gyro_data[index].z);
+                    // msg.angular_velocity.x = fifo_gyro_data[index].x * gyro_scale;
+                    // msg.angular_velocity.y = fifo_gyro_data[index].y * gyro_scale;
+                    // msg.angular_velocity.z = fifo_gyro_data[index].z * gyro_scale;
+                    // The following is according to ros2 imu messages specs:
+                    // Gyroscope and Accelerometer covariance are usually set to 0 if not calculated
+                    // If we have calibration data, we can set these. Otherwise, leave as 0
+                    // msg.angular_velocity_covariance[0] = -1; // Indicate no covariance data available
+                }
+
+                /* Print control frames like sensor time and skipped frame count. */
+                // printf("\nSkipped frame count = %d\n", fifoframe_.skipped_frame_count);
+                printf("Sensor time(in seconds) = %.4lf  s\r\n", (fifoframe_.sensor_time * BMI2_SENSORTIME_RESOLUTION));
+
+            }
         }
     }
 
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr publisher_;
     rclcpp::TimerBase::SharedPtr timer_;
     int i2c_fd_; // File descriptor for the I2C bus
-    struct bmi2_dev bmi2_dev; // Bosch sensor device structure
+    struct bmi2_dev bmi2_dev_; // Bosch sensor device structure
+    int8_t rslt_; // Status of API returns
+    uint16_t config_ = 0;
+    struct bmi2_sens_data sensor_data_; // parsed sensor data 
+    /* Initialize FIFO frame structure. */
+    struct bmi2_fifo_frame fifoframe_ = { 0 };
+
+
 };
 
 /**
@@ -389,6 +403,87 @@ void bmi2_delay_us(uint32_t period, void* unused_ptr)
     // Use C++ standard library for sleeping for a specified duration
     std::this_thread::sleep_for(std::chrono::microseconds(period));
 }
+
+/*!
+ * @brief This internal API is used to set configurations for accel and gyro.
+ */
+static int8_t set_accel_gyro_config(struct bmi2_dev *bmi2_dev)
+{
+    /* Status of api are returned to this variable. */
+    int8_t rslt;
+
+    /* Structure to define accel and gyro configurations. */
+    struct bmi2_sens_config config[2];
+
+    /* Configure the type of feature. */
+    config[0].type = BMI2_ACCEL;
+    config[1].type = BMI2_GYRO;
+
+    /* Get default configurations for the type of feature selected. */
+    rslt = bmi270_get_sensor_config(config, 2, bmi2_dev);
+    bmi2_error_codes_print_result(rslt);
+
+    if (rslt == BMI2_OK)
+    {
+        /* NOTE: The user can change the following configuration parameters according to their requirement. */
+        /* Accel configuration settings. */
+        /* Set Output Data Rate */
+        config[0].cfg.acc.odr = BMI2_ACC_ODR_200HZ;
+
+        /* Gravity range of the sensor (+/- 2G, 4G, 8G, 16G). */
+        config[0].cfg.acc.range = BMI2_ACC_RANGE_2G;
+
+        /* The bandwidth parameter is used to configure the number of sensor samples that are averaged
+         * if it is set to 2, then 2^(bandwidth parameter) samples
+         * are averaged, resulting in 4 averaged samples
+         * Note1 : For more information, refer the datasheet.
+         * Note2 : A higher number of averaged samples will result in a lower noise level of the signal, but
+         * this has an adverse effect on the power consumed.
+         */
+        config[0].cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;
+
+        /* Enable the filter performance mode where averaging of samples
+         * will be done based on above set bandwidth and ODR.
+         * There are two modes
+         *  0 -> Ultra low power mode
+         *  1 -> High performance mode(Default)
+         * For more info refer datasheet.
+         */
+        config[0].cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+
+        /* Gyro configuration settings. */
+        /* Set Output Data Rate */
+        config[1].cfg.gyr.odr = BMI2_GYR_ODR_200HZ;
+
+        /* Gyroscope Angular Rate Measurement Range.By default the range is 2000dps. */
+        config[1].cfg.gyr.range = BMI2_GYR_RANGE_2000;
+
+        /* Gyroscope Bandwidth parameters. By default the gyro bandwidth is in normal mode. */
+        config[1].cfg.gyr.bwp = BMI2_GYR_NORMAL_MODE;
+
+        /* Enable/Disable the noise performance mode for precision yaw rate sensing
+         * There are two modes
+         *  0 -> Ultra low power mode(Default)
+         *  1 -> High performance mode
+         */
+        config[1].cfg.gyr.noise_perf = BMI2_PERF_OPT_MODE;
+
+        /* Enable/Disable the filter performance mode where averaging of samples
+         * will be done based on above set bandwidth and ODR.
+         * There are two modes
+         *  0 -> Ultra low power mode
+         *  1 -> High performance mode(Default)
+         */
+        config[1].cfg.gyr.filter_perf = BMI2_PERF_OPT_MODE;
+
+        /* Set new configurations. */
+        rslt = bmi270_set_sensor_config(config, 2, bmi2_dev);
+        bmi2_error_codes_print_result(rslt);
+    }
+
+    return rslt;
+}
+
 
 /*!
  *  @brief Prints the execution status of the APIs.

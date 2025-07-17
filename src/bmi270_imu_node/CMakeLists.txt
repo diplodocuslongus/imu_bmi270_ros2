@@ -30,6 +30,9 @@ add_executable(bmi270_imu_calibtd_node src/bmi270_imu_calibtd_node.cpp)
 add_executable(bmi270_fifo_node src/bmi270_fifo_node.cpp) 
 
 
+# Add executable for the FIFO attempt node
+add_executable(bmi270_fifo_attempt src/bmi270_fifo_attempt.cpp) 
+
 # Link libraries
 # When linking to a library exported by another ament package with a namespace,
 # use the full namespaced target name.
@@ -46,6 +49,11 @@ target_link_libraries(bmi270_imu_calibtd_node
 
 # Link libraries for the FIFO node
 target_link_libraries(bmi270_fifo_node
+  bmi270_driver::bmi270_api
+)
+
+# Link libraries for the FIFO attempt node
+target_link_libraries(bmi270_fifo_attempt
   bmi270_driver::bmi270_api
 )
 
@@ -73,6 +81,13 @@ ament_target_dependencies(bmi270_fifo_node
   bmi270_driver
 )
 
+# Link ROS2 dependencies for the FIFO attempt
+ament_target_dependencies(bmi270_fifo_attempt
+  rclcpp
+  sensor_msgs
+  bmi270_driver
+)
+
 # Install executables
 # simple polling mode, uncalibrated
 install(TARGETS
@@ -90,6 +105,11 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# FIFO node executable
+install(TARGETS
+  bmi270_fifo_attempt
+  DESTINATION lib/${PROJECT_NAME}
+)
 # needed for ros2 run launch to find the launch file!
 install(DIRECTORY
   launch
