@@ -27,6 +27,9 @@
 #include "bmi270_driver/bmi2.h"
 #include "bmi270_driver/bmi270.h"
 
+
+                                   
+                    
 /******************************************************************************/
 /*!                  Macros                                                   */
 // From fifo_full_header_mode example
@@ -51,6 +54,25 @@
 
 /*! Macro to read sensortime byte in FIFO. */
 #define SENSORTIME_OVERHEAD_BYTE        UINT8_C(220)
+
+
+// should assume same ODR for accel and gyro for proper synch of accel and gyro
+constexpr int SENSOR_ODR_HZ = 200;
+
+constexpr uint8_t get_acc_odr() {
+    if (SENSOR_ODR_HZ == 100) return BMI2_ACC_ODR_100HZ;
+    if (SENSOR_ODR_HZ == 200) return BMI2_ACC_ODR_200HZ;
+    if (SENSOR_ODR_HZ == 400) return BMI2_ACC_ODR_400HZ;
+    return 0; // or something else
+}
+
+constexpr uint8_t get_gyr_odr() {
+    if (SENSOR_ODR_HZ == 100) return BMI2_GYR_ODR_100HZ;
+    if (SENSOR_ODR_HZ == 200) return BMI2_GYR_ODR_200HZ;
+    if (SENSOR_ODR_HZ == 400) return BMI2_GYR_ODR_400HZ;
+    return 0;
+}
+
 
 /* To read sensortime, extra 3 bytes are added to fifo buffer. */
 // TODO: needed?
@@ -203,37 +225,40 @@ public:
 private:
     void timer_callback()
     {
+        // will be used for time stamping
+        const double sensor_odr_hz = static_cast<double>(SENSOR_ODR_HZ); //  actual BMI270 ODR!
+                                                                         //  this cast is just c++ equivalent of (double), said to be safer and cleaner
+        const double sensor_time_interval_sec = 1.0 / sensor_odr_hz;
 
         uint16_t index = 0;
-        uint16_t fifo_length = 0;
-
         /* Variable to get fifo full interrupt status. */
         uint16_t int_status = 0;
 
+        uint16_t accel_frame_requested = BMI2_FIFO_ACCEL_FRAME_COUNT;
+        uint16_t gyro_frame_requested = BMI2_FIFO_GYRO_FRAME_COUNT;
         uint16_t accel_frame_length = BMI2_FIFO_ACCEL_FRAME_COUNT;
-
         uint16_t gyro_frame_length = BMI2_FIFO_GYRO_FRAME_COUNT;
+        uint16_t fifo_current_length = 0; //  actual FIFO length from sensor
 
         // Read sensor data from BMI270
         /* Read FIFO data on interrupt. */
         rslt_ = bmi2_get_int_status(&int_status, &bmi2_dev_);
         bmi2_error_codes_print_result(rslt_);
 
-        // Convert raw accelerometer data to m/s^2
+        // Convert raw accelerometer and gyro data to m/s^2 and rad/s
         float acc_scale = (4.0f * 9.80665f) / 32768.0f; // Scale factor for +/-4G range (m/s^2 per LSB)
-        // Convert raw gyroscope data to rad/s
         float gyro_scale = (2000.0f / 32768.0f) * (M_PI / 180.0f); // Scale factor for +/-2000 dps range (rad/s per LSB)
         if ((rslt_ == BMI2_OK) && (int_status & BMI2_FFULL_INT_STATUS_MASK)){
             RCLCPP_INFO(get_logger(), "got ok rslt_ in callback.");
-            accel_frame_length = BMI2_FIFO_ACCEL_FRAME_COUNT;
-            gyro_frame_length = BMI2_FIFO_GYRO_FRAME_COUNT;
-            rslt_ = bmi2_get_fifo_length(&fifo_length, &bmi2_dev_);
+            accel_frame_requested = BMI2_FIFO_ACCEL_FRAME_COUNT; // max capacity
+            gyro_frame_requested = BMI2_FIFO_GYRO_FRAME_COUNT; // max capacity
+            rslt_ = bmi2_get_fifo_length(&fifo_current_length, &bmi2_dev_);
             bmi2_error_codes_print_result(rslt_);
             /* Updating FIFO length to be read based on available length and dummy byte updation */
-            fifoframe_.length = fifo_length + SENSORTIME_OVERHEAD_BYTE + bmi2_dev_.dummy_byte;
-            RCLCPP_INFO(get_logger(), "FIFO data bytes available : %d \n", fifo_length);
-            printf("\nFIFO data bytes available : %d \n", fifo_length);
-            printf("\nFIFO data bytes requested : %d \n", fifoframe_.length);
+            fifoframe_.length = fifo_current_length + SENSORTIME_OVERHEAD_BYTE + bmi2_dev_.dummy_byte;
+            // printf("\nFIFO data bytes available : %d \n", fifo_current_length);
+            // printf("\nFIFO data bytes requested : %d \n", fifoframe_.length);
+            RCLCPP_INFO(get_logger(), "FIFO data bytes available: %u, bytes requested: %u", fifo_current_length, fifoframe_.length);
 
             /* Read FIFO data. */
             rslt_ = bmi2_read_fifo_data(&fifoframe_, &bmi2_dev_);
@@ -244,25 +269,32 @@ private:
             bmi2_error_codes_print_result(rslt_);
             if (rslt_ == BMI2_OK)
             {
-                printf("\nFIFO accel frames requested : %d \n", accel_frame_length);
+                // printf("\nFIFO accel frames requested : %d \n", accel_frame_requested);
 
                 /* Parse the FIFO data to extract accelerometer data from the FIFO buffer. */
                 (void)bmi2_extract_accel(fifo_accel_data, &accel_frame_length, &fifoframe_, &bmi2_dev_);
-                printf("\nFIFO accel frames extracted : %d \n", accel_frame_length);
+                // printf("\nFIFO accel frames extracted : %d \n", accel_frame_length);
 
-                printf("\nFIFO gyro frames requested : %d \n", gyro_frame_length);
+                // printf("\nFIFO gyro frames requested : %d \n", gyro_frame_length);
 
                 /* Parse the FIFO data to extract gyro data from the FIFO buffer. */
                 (void)bmi2_extract_gyro(fifo_gyro_data, &gyro_frame_length, &fifoframe_, &bmi2_dev_);
-                printf("\nFIFO gyro frames extracted : %d \n", gyro_frame_length);
+                // printf("\nFIFO gyro frames extracted : %d \n", gyro_frame_length);
 
-                printf("\nExtracted accel frames\n");
+                RCLCPP_INFO(get_logger(), "Accel frames requested: %u, Gyro frames requested: %u", accel_frame_requested, gyro_frame_requested);
+                RCLCPP_INFO(get_logger(), "Accel frames extracted: %u, Gyro frames extracted: %u", accel_frame_length, gyro_frame_length);
+                // make sure we have the same number of samples from both accel and gyro
+                // (don't want to miss some or repeat some)
+                size_t num_synchronized_samples = std::min(accel_frame_length, gyro_frame_length);
+                if (num_synchronized_samples == 0) { // can happen if accel data but no gyro or vice versa.
+                    RCLCPP_WARN(get_logger(), "No synchronized samples extracted from FIFO.");
+                    return;
+                }
 
-                printf("ACCEL_DATA, X, Y, Z\n");
+                // TODO: improve timestamping
 
-                // TODO review publishing, esp, acc and gyro nb frame may be different.
-                /* Print the parsed accelerometer data from the FIFO buffer. */
-                for (index = 0; index < accel_frame_length; index++)
+                RCLCPP_INFO(get_logger(), "Publishing %u synchronized IMU samples.", num_synchronized_samples);
+                for (index = 0; index < num_synchronized_samples; index++)
                 {
                     // Create and populate ROS2 Imu message
                     auto msg = sensor_msgs::msg::Imu();
@@ -270,11 +302,6 @@ private:
                     clock_gettime(CLOCK_MONOTONIC, &tp);
                     msg.header.stamp = rclcpp::Time(tp.tv_sec * 1000000000 + tp.tv_nsec, RCL_STEADY_TIME);
                     msg.header.frame_id = "imu_link"; // Coordinate frame ID
-                    // printf("%d, %d, %d, %d\n",
-                    //        index,
-                    //        fifo_accel_data[index].x,
-                    //        fifo_accel_data[index].y,
-                    //        fifo_accel_data[index].z);
                     msg.linear_acceleration.x = fifo_accel_data[index].x * acc_scale;
                     msg.linear_acceleration.y = fifo_accel_data[index].y * acc_scale;
                     msg.linear_acceleration.z = fifo_accel_data[index].z * acc_scale;
@@ -284,23 +311,6 @@ private:
                     msg.angular_velocity.z = fifo_gyro_data[index].z * gyro_scale;
                     msg.angular_velocity_covariance[0] = -1; // Indicate no covariance data available
                     publisher_->publish(msg);
-                }
-
-                // printf("\nExtracted gyro frames\n");
-                // printf("GYRO_DATA, X, Y, Z\n");
-
-                /* Print the parsed gyro data from the FIFO buffer. */
-                for (index = 0; index < gyro_frame_length; index++)
-                {
-                    // printf("%d, %d, %d, %d\n", index, fifo_gyro_data[index].x, fifo_gyro_data[index].y,
-                    //        fifo_gyro_data[index].z);
-                    // msg.angular_velocity.x = fifo_gyro_data[index].x * gyro_scale;
-                    // msg.angular_velocity.y = fifo_gyro_data[index].y * gyro_scale;
-                    // msg.angular_velocity.z = fifo_gyro_data[index].z * gyro_scale;
-                    // The following is according to ros2 imu messages specs:
-                    // Gyroscope and Accelerometer covariance are usually set to 0 if not calculated
-                    // If we have calibration data, we can set these. Otherwise, leave as 0
-                    // msg.angular_velocity_covariance[0] = -1; // Indicate no covariance data available
                 }
 
                 /* Print control frames like sensor time and skipped frame count. */
@@ -428,7 +438,8 @@ static int8_t set_accel_gyro_config(struct bmi2_dev *bmi2_dev)
         /* NOTE: The user can change the following configuration parameters according to their requirement. */
         /* Accel configuration settings. */
         /* Set Output Data Rate */
-        config[0].cfg.acc.odr = BMI2_ACC_ODR_200HZ;
+        config[0].cfg.acc.odr = get_acc_odr();
+        // config[0].cfg.acc.odr = BMI2_ACC_ODR_200HZ;
 
         /* Gravity range of the sensor (+/- 2G, 4G, 8G, 16G). */
         config[0].cfg.acc.range = BMI2_ACC_RANGE_2G;
@@ -453,6 +464,7 @@ static int8_t set_accel_gyro_config(struct bmi2_dev *bmi2_dev)
 
         /* Gyro configuration settings. */
         /* Set Output Data Rate */
+        config[1].cfg.gyr.odr = get_gyr_odr();;
         config[1].cfg.gyr.odr = BMI2_GYR_ODR_200HZ;
 
         /* Gyroscope Angular Rate Measurement Range.By default the range is 2000dps. */
