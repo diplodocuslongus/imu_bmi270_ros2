@@ -53,6 +53,15 @@ build:
 ## use
 
 Connect the IMU following the dtoverlay setting in `/boot/firmware/config.txt`
+Example is shown in the images, tested connections were (they must match the dtoverlay if not using the default I2C):
+
+- SDA (blue) from IMU to pin #3 (GPIO2) on the PI
+- SCL (yellow) from IMU to pin #5 (GPIO3) on the PI
+
+Or:
+
+- SDA (blue) from IMU to pin #15 (GPIO22) on the PI
+- SCL (yellow) from IMU to pin #16 (GPIO23) on the PI
 
 Tested with the IMU connected to either i2c bus 1 (i2c1) or i2c bus 3 (adjust the code to match the i2c bus).
 
@@ -63,11 +72,11 @@ Add the following to  config.txt if connecting the BMI270 to i2c bus 1, with SDA
 Or enable i2c in raspi-config
 
 Tip: enable a given i2c bus at run time without changing config.txt. There's no specific additional setup for the ic2 bus 1 besides enabling i2c. 
-The following enables i2c bus 3 on GPIO pins 22 and 23.
+The following enables i2c bus 3 on GPIO pins 22 and 23 (physical pins #15 and #16, respectively).
 
     $ sudo dtoverlay i2c3-pi5 pins_22_23
 
-For now if the bus and addresses of the IMU are hardcoded in the node source code, and need to be adjusted accordingly.
+For now the bus and addresses of the IMU are hardcoded in the node source code, and need to be adjusted accordingly.
 
 See `i2c_fd_ = open("/dev/i2c-1", O_RDWR); # change e.g. i2c-3` 
 
