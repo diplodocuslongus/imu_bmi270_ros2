@@ -213,9 +213,33 @@ public:
         bmi2_error_codes_print_result(rslt_);
 
         /* Map FIFO full interrupt. */
-        fifoframe_.data_int_map = BMI2_FFULL_INT;
+        // fifoframe_.data_int_map = BMI2_FFULL_INT; 
+        /* we use the FIFO water-mark interrupt . */
+        fifoframe_.data_int_map = BMI2_FWM_INT;
+
+        /* Map water-mark interrupt to the required interrupt pin. */
         rslt_ = bmi2_map_data_int(fifoframe_.data_int_map, BMI2_INT1, &bmi2_dev_);
         bmi2_error_codes_print_result(rslt_);
+
+        /* Set water-mark level. */
+        fifoframe_.wm_lvl = BMI2_FIFO_WATERMARK_LEVEL;
+
+        /* Interrupt pin configuration */
+        pin_config.pin_type = BMI2_INT1;
+        pin_config.pin_cfg[0].input_en = BMI2_INT_INPUT_DISABLE;
+        pin_config.pin_cfg[0].lvl = BMI2_INT_ACTIVE_LOW;
+        pin_config.pin_cfg[0].od = BMI2_INT_PUSH_PULL;
+        pin_config.pin_cfg[0].output_en = BMI2_INT_OUTPUT_ENABLE;
+        pin_config.int_latch = BMI2_INT_NON_LATCH;
+
+        /* Set Hardware interrupt pin configuration */
+        rslt_ = bmi2_set_int_pin_config(&pin_config, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
+
+        /* Set the water-mark level if water-mark interrupt is mapped. */
+        rslt_ = bmi2_set_fifo_wm(fifoframe.wm_lvl, &bmi2_dev_);
+        bmi2_error_codes_print_result(rslt_);
+
 
         uint8_t sensortime_raw[3] = { 0 };
         rslt_ = bmi2_get_regs(BMI2_CHIP_ID_ADDR, sensortime_raw, 3, &bmi2_dev_);
@@ -264,8 +288,12 @@ private:
         // Convert raw accelerometer and gyro data to m/s^2 and rad/s
         float acc_scale = (4.0f * 9.80665f) / 32768.0f; // Scale factor for +/-4G range (m/s^2 per LSB)
         float gyro_scale = (2000.0f / 32768.0f) * (M_PI / 180.0f); // Scale factor for +/-2000 dps range (rad/s per LSB)
-        if ((rslt_ == BMI2_OK) && (int_status & BMI2_FFULL_INT_STATUS_MASK)){
+        if ((rslt_ == BMI2_OK) && (int_status & BMI2_FWM_INT_STATUS_MASK)){
             RCLCPP_INFO(get_logger(), "got ok rslt_ in callback.");
+            rslt = bmi2_get_fifo_wm(&watermark, &bmi2_dev);
+            bmi2_error_codes_print_result(rslt);
+            printf("\nFIFO watermark level : %d\n", watermark);
+
             accel_frame_requested = BMI2_FIFO_ACCEL_FRAME_COUNT; // max capacity
             gyro_frame_requested = BMI2_FIFO_GYRO_FRAME_COUNT; // max capacity
             rslt_ = bmi2_get_fifo_length(&fifo_current_length, &bmi2_dev_);
