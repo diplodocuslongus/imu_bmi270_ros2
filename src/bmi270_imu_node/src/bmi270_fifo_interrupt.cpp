@@ -1,6 +1,9 @@
 /**\
- * FIFO with header (gryo, accel and SensorTime), based on the bosch example 
- * and Chobits' .c adaptation for the RPi.
+ * FIFO with header (gryo, accel and SensorTime), setup to output interrupt trigger GS camera.
+ * Settings to consider:
+ * - FIFO ODR (output data rate)
+ * - interrupt strategy, here, interrupt on fifo watermark level so as to gerenate interupts at a predefined FPS (freuqnecy) for a camera (or other usage!)
+ * - level of the fifo watermark level at which the bmi270 will generate its interrupt
  *
  * This code makes use of the Bosch code, released with the following license.
  *
@@ -40,15 +43,28 @@
 
 /*! Number of accel frames to be extracted from FIFO. */
 
-/*! Calculation for frame count: Total frame count = Fifo buffer size(2048)/ Total frames(6 Accel, 6 Gyro and 1 header,
- * totaling to 13) which equals to 157.
- *
- * Extra frames to parse sensortime data
+/*! Calculation for frame count: Total frame count = 
+ * Fifo buffer size(ex 2048)/ Total frames(6 Accel, 6 Gyro and 1 header,
+ * totaling to 13) = 157.
+*
+ * Extra frames to parse sensortime data, which makes for 185 
  */
-#define BMI2_FIFO_ACCEL_FRAME_COUNT     UINT8_C(185)
+/*!
+ * Calculation:
+ * fifo_watermark_level = 650, accel_frame_len = 6, gyro_frame_len = 6 header_byte = 1.
+ * fifo_accel_frame_count = (650 / (6 + 6 + 1 )) = 50 frames
+ * NOTE: Extra frames are read in order to get sensor time
+ * example of calculation of interrupt firing rate:
+ * at ODR = 200Hz, if we wait 650 fifo frames (watermark level) then we fire every 650/200 ~ 3.2s  
+ */
+
+#define BMI2_FIFO_ACCEL_FRAME_COUNT     UINT8_C(70)
 
 /*! Number of gyro frames to be extracted from FIFO. */
-#define BMI2_FIFO_GYRO_FRAME_COUNT      UINT8_C(185)
+#define BMI2_FIFO_GYRO_FRAME_COUNT      UINT8_C(70)
+
+/*! Setting the watermark level in FIFO */
+#define BMI2_FIFO_WATERMARK_LEVEL       UINT16_C(650)
 
 /*! Macro to read sensortime byte in FIFO. */
 #define SENSORTIME_OVERHEAD_BYTE        UINT8_C(220)
@@ -71,6 +87,8 @@ constexpr uint8_t get_gyr_odr() {
     return 0;
 }
 
+
+volatile uint8_t interrupt_status = 0;
 
 /* To read sensortime, extra 3 bytes are added to fifo buffer. */
 // TODO: needed?
