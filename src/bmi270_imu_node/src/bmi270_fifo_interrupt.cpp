@@ -55,7 +55,15 @@
  * fifo_accel_frame_count = (650 / (6 + 6 + 1 )) = 50 frames
  * NOTE: Extra frames are read in order to get sensor time
  * example of calculation of interrupt firing rate:
+ * at ODR = 200Hz, if we wait 50 frames then we fire the interrupt every 50 (frames)/ 200 (Hz)= 0.25s, which is  ~4Hz
+ * If we want say 20Hz, we need to set the fifo watermark level at 130
+ * we have: FWL / 13 = nb_accel(and gyro)_frames
+ * ODR/nb_accel_frames = fps
+ * and so FWL = 13 * ODR / fps
+ *
  * at ODR = 200Hz, if we wait 650 fifo frames (watermark level) then we fire every 650/200 ~ 3.2s  
+ * it seems the interrupt isn't at the number of fifo frames but the number of accel / gyro frames 
+ * (which makes sense, what we are interested in is not all the fifo frames but the actual accel and gyro frames)
  */
 
 #define BMI2_FIFO_ACCEL_FRAME_COUNT     UINT8_C(70)
@@ -64,7 +72,8 @@
 #define BMI2_FIFO_GYRO_FRAME_COUNT      UINT8_C(70)
 
 /*! Setting the watermark level in FIFO */
-#define BMI2_FIFO_WATERMARK_LEVEL       UINT16_C(650)
+#define BMI2_FIFO_WATERMARK_LEVEL       UINT16_C(130) // will trigger interrupt at ~20Hz 
+// #define BMI2_FIFO_WATERMARK_LEVEL       UINT16_C(650) // will trigger interrupt at ~4Hz 
 
 /*! Macro to read sensortime byte in FIFO. */
 #define SENSORTIME_OVERHEAD_BYTE        UINT8_C(220)
@@ -88,7 +97,7 @@ constexpr uint8_t get_gyr_odr() {
 }
 
 
-volatile uint8_t interrupt_status = 0;
+// volatile uint8_t interrupt_status = 0;
 
 /* To read sensortime, extra 3 bytes are added to fifo buffer. */
 // TODO: needed?
@@ -119,6 +128,14 @@ int8_t bmi2_i2c_read(uint8_t reg_addr, uint8_t *data, uint32_t len, void *intf_p
 int8_t bmi2_i2c_write(uint8_t reg_addr, const uint8_t *data, uint32_t len, void *intf_ptr);
 void bmi2_delay_us(uint32_t period, void*); // void* parameter is required by API but unused here
 void bmi2_error_codes_print_result(int8_t rslt);
+
+// static void interrupt_callback(uint32_t param1, uint32_t param2)
+// {
+//     (void)param1;
+//     (void)param2;
+//     interrupt_status = 1;
+// }
+//
 
 class BMI270Node : public rclcpp::Node
 {
@@ -224,20 +241,21 @@ public:
         /* Set water-mark level. */
         fifoframe_.wm_lvl = BMI2_FIFO_WATERMARK_LEVEL;
 
+        struct bmi2_int_pin_config pin_config_ = { 0 };
         /* Interrupt pin configuration */
-        pin_config.pin_type = BMI2_INT1;
-        pin_config.pin_cfg[0].input_en = BMI2_INT_INPUT_DISABLE;
-        pin_config.pin_cfg[0].lvl = BMI2_INT_ACTIVE_LOW;
-        pin_config.pin_cfg[0].od = BMI2_INT_PUSH_PULL;
-        pin_config.pin_cfg[0].output_en = BMI2_INT_OUTPUT_ENABLE;
-        pin_config.int_latch = BMI2_INT_NON_LATCH;
+        pin_config_.pin_type = BMI2_INT1;
+        pin_config_.pin_cfg[0].input_en = BMI2_INT_INPUT_DISABLE;
+        pin_config_.pin_cfg[0].lvl = BMI2_INT_ACTIVE_LOW;
+        pin_config_.pin_cfg[0].od = BMI2_INT_PUSH_PULL;
+        pin_config_.pin_cfg[0].output_en = BMI2_INT_OUTPUT_ENABLE;
+        pin_config_.int_latch = BMI2_INT_NON_LATCH;
 
         /* Set Hardware interrupt pin configuration */
-        rslt_ = bmi2_set_int_pin_config(&pin_config, &bmi2_dev_);
+        rslt_ = bmi2_set_int_pin_config(&pin_config_, &bmi2_dev_);
         bmi2_error_codes_print_result(rslt_);
 
         /* Set the water-mark level if water-mark interrupt is mapped. */
-        rslt_ = bmi2_set_fifo_wm(fifoframe.wm_lvl, &bmi2_dev_);
+        rslt_ = bmi2_set_fifo_wm(fifoframe_.wm_lvl, &bmi2_dev_);
         bmi2_error_codes_print_result(rslt_);
 
 
@@ -273,6 +291,7 @@ private:
         uint16_t index = 0;
         /* Variable to get fifo full interrupt status. */
         uint16_t int_status = 0;
+        uint16_t watermark = 0;
 
         uint16_t accel_frame_requested = BMI2_FIFO_ACCEL_FRAME_COUNT;
         uint16_t gyro_frame_requested = BMI2_FIFO_GYRO_FRAME_COUNT;
@@ -290,8 +309,8 @@ private:
         float gyro_scale = (2000.0f / 32768.0f) * (M_PI / 180.0f); // Scale factor for +/-2000 dps range (rad/s per LSB)
         if ((rslt_ == BMI2_OK) && (int_status & BMI2_FWM_INT_STATUS_MASK)){
             RCLCPP_INFO(get_logger(), "got ok rslt_ in callback.");
-            rslt = bmi2_get_fifo_wm(&watermark, &bmi2_dev);
-            bmi2_error_codes_print_result(rslt);
+            rslt_ = bmi2_get_fifo_wm(&watermark, &bmi2_dev_);
+            bmi2_error_codes_print_result(rslt_);
             printf("\nFIFO watermark level : %d\n", watermark);
 
             accel_frame_requested = BMI2_FIFO_ACCEL_FRAME_COUNT; // max capacity
